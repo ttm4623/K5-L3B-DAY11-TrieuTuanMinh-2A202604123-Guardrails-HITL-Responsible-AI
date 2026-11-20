@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+import time
+import uuid
 
 
 def default_audit_log_path() -> str:
@@ -24,10 +26,22 @@ class AuditLogPlugin:
         self.name = "audit_log"
         self.logs: list[dict] = []
         self._open: dict[str, float] = {}
+        self._records: dict[str, dict] = {}
 
     def record_input(self, *, user_id: str, text: str, request_id: str | None = None):
-        """TODO: store input + start timestamp keyed by request_id/user_id."""
-        raise NotImplementedError("Implement AuditLogPlugin.record_input")
+        """Store an input and return its correlation ID."""
+        key = request_id or user_id or uuid.uuid4().hex
+        started_at = utc_now_iso()
+        record = {
+            "request_id": key,
+            "user_id": user_id,
+            "input": text,
+            "started_at": started_at,
+        }
+        self.logs.append(record)
+        self._records[key] = record
+        self._open[key] = time.perf_counter()
+        return key
 
     def record_output(
         self,
@@ -38,15 +52,43 @@ class AuditLogPlugin:
         layer: str | None = None,
         request_id: str | None = None,
     ):
-        """TODO: store output, layer decision, latency; append to self.logs."""
-        raise NotImplementedError("Implement AuditLogPlugin.record_output")
+        """Store the final decision and latency for a correlated input."""
+        key = request_id or user_id
+        record = self._records.get(key)
+        started = self._open.pop(key, None)
+        if record is None:
+            record = {
+                "request_id": key or uuid.uuid4().hex,
+                "user_id": user_id,
+                "input": None,
+                "started_at": None,
+            }
+            self.logs.append(record)
+            self._records[key] = record
+
+        record.update(
+            {
+                "output": text,
+                "blocked": blocked,
+                "layer": layer,
+                "finished_at": utc_now_iso(),
+                "latency_ms": (
+                    round((time.perf_counter() - started) * 1000, 3)
+                    if started is not None
+                    else None
+                ),
+            }
+        )
 
     def export_json(self, filepath: str | None = None):
         """Write logs to disk (JSON array) under repo-root ``outputs/`` by default."""
-        # TODO: path = filepath or default_audit_log_path()
-        #       ensure parent dirs exist, dump self.logs with indent=2
-        _ = filepath or default_audit_log_path()
-        raise NotImplementedError("Implement AuditLogPlugin.export_json")
+        path = Path(filepath or default_audit_log_path())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(self.logs, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return str(path)
 
 
 def utc_now_iso() -> str:
